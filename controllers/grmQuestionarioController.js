@@ -1,0 +1,220 @@
+/**
+ * @file grmQuestionarioController.js
+ * @description Este arquivo é responsável por controlar as operações de gerenciamento de questionários, como cadastrar, atualizar e deletar questionários.
+ */
+
+const connection = require('../dbConfig.js');
+const WebSocket = require('ws');
+const mongoose = require("mongoose");
+const http = require('http');
+const QuestaoModel = require("../Models/questaoModel.js")
+const QuestionarioModel = require('../Models/questionarioModel.js');
+const RespostasAluno = require('../Models/respostasModel.js');  // Importa o modelo
+const apiGptController = require('./apiGptController.js');
+//const questoes = mongoose.model('Questao', questaoModel);
+const bodyParser = require('body-parser')
+const turmaController = require('./turmaController.js')
+const webSocketController = require('../webSocketController.js');
+const { response } = require('express');
+
+
+
+
+/**
+ * @async
+ * @function cadastraQuestionario
+ * @description Cadastra um novo questionário e suas questões associadas.
+ * @param {Object} request - O objeto de requisição do Express.
+ * @param {Object} response - O objeto de resposta do Express.
+ */
+async function cadastraQuestionario(request, response) {
+    const { questionario } = request.body;
+    console.log();
+    await connection(); 
+    const session = await mongoose.startSession();
+    try {
+      //adiciona comentarios as questões
+     // var questionarioAux = await apiGptController.getChatGPTResponse(questionario);
+      session.startTransaction(); // Inicia a transação
+      // 1. Criar e salvar o questionário
+      const novoQuestionario = new QuestionarioModel({
+        nome: questionario.nome,
+        descricao: questionario.descricao,
+        codigo: questionario.codigo || (await gerarCodigoQuestionario()),
+        //explicacao : questionarioAux.explicacao
+      });
+      console.log(novoQuestionario);
+      // Salva o questionário no banco de dados
+      await novoQuestionario.save({ session });
+      // 2. Salvar as questões associadas ao questionário
+      const questoes = questionario.questoes.map(questaoData => ({
+        enunciado: questaoData.enunciado,
+        resposta: normalizaResposta(questaoData.resposta),
+        tema: questaoData.tema,
+        codigoQuestionario: novoQuestionario.codigo
+      }));
+      // Salva as questões em lote
+      await QuestaoModel.insertMany(questoes, { session });
+      // Commit da transação
+      await session.commitTransaction();
+      response.status(200).json({ success: true, message: "Questionário e questões cadastrados com sucesso!", questionario: novoQuestionario });
+    } catch (error) {
+      await session.abortTransaction(); // Aborta a transação em caso de erro
+      console.error('Erro ao cadastrar questionário e questões:', error);
+      response.status(500).json({ success: false, message: 'Erro ao cadastrar questionário e questões.', error });
+    } finally {
+      session.endSession(); // Finaliza a sessão
+      console.log("Sessão finalizada.");
+    }
+  }
+  
+  /**
+ * @async
+ * @function gerarCodigoQuestionario
+ * @description Gera um novo código para um questionário com base no último código existente.
+ * @returns {Promise<string>} O novo código do questionário.
+ */
+  async function gerarCodigoQuestionario() {
+    await connection(); // Garante a conexão com o banco
+    const questionarios = await QuestionarioModel.find({}, { codigo: 1 }).lean();
+
+    if (!questionarios || questionarios.length === 0) {
+      return '1'; // Primeiro código
+    }
+
+    const codigosNumericos = questionarios
+      .map(q => parseInt(q.codigo))
+      .filter(c => !isNaN(c));
+
+    const maiorCodigo = Math.max(...codigosNumericos);
+
+    console.log(maiorCodigo + 1);
+    return (maiorCodigo + 1).toString();
+}
+  
+ /**
+ * @function normalizaResposta
+ * @description Normaliza a resposta de uma questão para 'V' ou 'F'.
+ * @param {string} resposta - A resposta a ser normalizada.
+ * @returns {string} A resposta normalizada.
+ */
+  function normalizaResposta(resposta){
+    if (typeof resposta === 'string') {
+      resposta = resposta.toLowerCase(); // Converter para minúsculo para evitar problemas com maiúsculas/minúsculas
+    }
+    
+    if (resposta === 'v' || resposta === 'verdadeiro' || resposta === 'true' || resposta ==="Verdadeiro") {
+      return 'V';
+    } else if (resposta === 'f' || resposta === 'falso' || resposta === 'false' || resposta === "Falso") {
+      return 'F';
+    } else {
+      throw new Error(`Resposta inválida: ${resposta}`); // Caso a resposta não seja válida
+    }
+  }
+
+/**
+ * @async
+ * @function deletarQuestionario
+ * @description Deleta um questionário e suas questões associadas.
+ * @param {Object} request - O objeto de requisição do Express.
+ * @param {Object} response - O objeto de resposta do Express.
+ */
+async function deletarQuestionario(request, response) {
+    const { codigoQuestionario } = request.body; // Recebe o código do questionário no corpo da requisição
+    await connection(); 
+    const session = await mongoose.startSession();
+    
+    try {
+      session.startTransaction(); // Inicia a transação
+  
+      // 1. Deletar as questões associadas ao questionário
+      const questoesDeletadas = await QuestaoModel.deleteMany({ codigoQuestionario }, { session });
+      console.log(`${questoesDeletadas.deletedCount} questões deletadas.`);
+  
+      // 2. Deletar o questionário
+      const questionarioDeletado = await QuestionarioModel.deleteOne({ codigo: codigoQuestionario }, { session });
+      console.log(`Questionário deletado: ${questionarioDeletado.deletedCount}`);
+  
+      // Commit da transação
+      await session.commitTransaction();
+      
+      response.status(200).json({ success: true, message: "Questionário e questões deletados com sucesso." });
+  
+    } catch (error) {
+      await session.abortTransaction(); // Aborta a transação em caso de erro
+      console.error('Erro ao deletar questionário e questões:', error);
+      response.status(500).json({ success: false, message: 'Erro ao deletar questionário e questões.', error });
+    } finally {
+      session.endSession(); // Finaliza a sessão
+      console.log("Sessão finalizada.");
+    }
+  }
+  
+
+/**
+ * @async
+ * @function atualizaQuestionario
+ * @description Atualiza um questionário e suas questões associadas.
+ * @param {Object} request - O objeto de requisição do Express.
+ * @param {Object} response - O objeto de resposta do Express.
+ */
+async function atualizaQuestionario(request, response) {
+
+    const { questionario } = request.body;
+    console.log("Questionário:", questionario);
+    if (!questionario) {
+        return response.status(400).json({ error: "Erro ao ler o questionário" });
+    }
+    //conecta ao banco
+    await connection(); 
+    const session = await mongoose.startSession();
+    try {
+        session.startTransaction(); // Inicia a transação
+        // 1. Buscar o questionário existente pelo código e atualizar
+        console.log(questionario.codigo);
+        const questionarioExistente = await QuestionarioModel.findOneAndUpdate(
+          { codigo: questionario.codigo },
+          { 
+              nome: questionario.nome,
+              descricao: questionario.descricao
+          },
+          { new: true, session }
+      );
+        
+        if (!questionarioExistente) {
+            throw new Error('Questionário não encontrado');
+        }
+        else{"questionario encontrado"}
+        // 2. Remover questões antigas associadas ao questionário
+        await QuestaoModel.deleteMany({ codigoQuestionario: questionario.codigo }, { session });
+
+        // 3. Adicionar as novas questões ao questionário
+        const questoes = questionario.questoes.map(questaoData => ({
+            enunciado: questaoData.enunciado,
+            resposta: normalizaResposta(questaoData.resposta),
+            tema: questaoData.tema,
+            codigoQuestionario: questionario.codigo
+        }));
+        
+        // Inserir as novas questões em lote
+         await QuestaoModel.insertMany(questoes, { session });
+
+        // Commit da transação
+        await session.commitTransaction();
+        response.status(200).json({ success: true, message: "Questionário e questões atualizados com sucesso!", questionario: questionarioExistente });
+    } catch (error) {
+        await session.abortTransaction(); // Aborta a transação em caso de erro
+        console.error('Erro ao atualizar questionário e questões:', error);
+        response.status(500).json({ success: false, message: 'Erro ao atualizar questionário e questões.', error });
+    } finally {
+        session.endSession(); // Finaliza a sessão
+        console.log("Sessão finalizada.");
+    }
+}
+
+
+  module.exports = {
+    cadastraQuestionario,
+    deletarQuestionario,
+    atualizaQuestionario
+}
