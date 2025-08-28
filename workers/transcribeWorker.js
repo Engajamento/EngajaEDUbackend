@@ -3,7 +3,7 @@ const path = require('path');
 const axios = require('axios');
 const audioConfig = require('../config/audioProcessing');
 
-const API_URL = 'http://localhost:5001/audioSession/transcribe'; // ajuste a porta se necessário
+const API_URL = 'https://engajedu.com.br/api/audioSession/transcribe'; // ajuste a porta se necessário
 
 async function transcribeAllChunks(sessionId) {
     const base = path.join(__dirname, '..', 'temp', sessionId);
