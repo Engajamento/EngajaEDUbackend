@@ -115,31 +115,52 @@ async function getTurmaTeste(request, response) {
  */
   async function getTurmas(request, response) {
     try {
-        // Conectando ao MongoDB
-        await connection(); 
-
-        // Busca todas as turmas
-        const turmas = await mongoose.connection.db.collection("Turma").find().toArray();
-
-        if (!turmas || turmas.length === 0) {
-            console.log('Nenhuma turma encontrada.');
-            return response.status(404).json({ message: 'Nenhuma turma encontrada' });
-        }
-
-        // // Para cada turma, busca os alunos associados
-        // const turmasComAlunos = await Promise.all(turmas.map(async (turma) => {
-        //     const alunos = await mongoose.connection.db.collection("Aluno").find({ Turma: turma.codigo }).toArray();
-        //     turma.alunos = alunos; // Associa os alunos à turma
-        //     return turma;
-        // }));
-
-        // Retorna o resultado com turmas e alunos associados
-        response.json(turmas);
-
-    } catch (error) {
-        console.error('Erro ao consultar as coleções:', error);
-        response.status(500).json({ error: 'Erro ao consultar as coleções' });
+    const { usuario } = request.query;
+    if (!usuario) {
+      return response.status(400).json({ error: 'usuario do professor é obrigatório' });
     }
+    await connection();
+
+    const professor = await mongoose.connection.db
+      .collection('Professor')
+      .findOne(
+        { Usuario: String(usuario).trim() },
+        {
+          projection: { Turmas: 1 },
+          collation: { locale: 'pt', strength: 1 }, 
+        }
+      );
+
+    if (!professor) {
+      return response.status(404).json({ error: 'Professor não encontrado' });
+    }
+
+    const ids = Array.isArray(professor.Turmas) ? professor.Turmas : [];
+    if (!ids.length) {
+      return response.status(200).json([]);
+    }
+
+    const turmaIds = ids.map((id) =>
+      typeof id === 'string' ? new mongoose.Types.ObjectId(id) : id
+    );
+
+    const turmas = await mongoose.connection.db
+      .collection('Turma')
+      .find(
+        { _id: { $in: turmaIds } },
+        {
+          projection: { _id: 1, nome: 1, codigo: 1, periodo: 1}
+        }
+      )
+      .sort({ _id: -1 })
+      .limit(200)
+      .toArray();
+
+    return response.status(200).json(turmas);
+  } catch (error) {
+    console.error('Erro ao consultar as coleções:', error);
+    return response.status(500).json({ error: 'Erro ao consultar as coleções', message: error.message });
+  }
 }
 
 /**

@@ -42,50 +42,60 @@ const jsonParser = bodyParser.json();
  * @param {Object} request - O objeto de requisição do Express.
  * @param {Object} response - O objeto de resposta do Express.
  */
-async function getQuestionario(request, response){
+async function getQuestionario(req, res) {
   try {
-    console.log('🔍 Iniciando busca de questionários...');
-    
-    // Conecta ao banco de dados com timeout
-    await connection(); 
-    console.log('✅ Conexão com banco estabelecida');
-    
-    // Cria índice se não existir para otimizar consultas futuras
-    try {
-      await mongoose.connection.db.collection("Questionario").createIndex({ _id: -1 });
-      console.log('📊 Índice criado/verificado para otimização');
-    } catch (indexError) {
-      console.log('ℹ️ Índice já existe ou erro na criação:', indexError.message);
-    }
-    
-    // Busca questionários com limite e projeção otimizada
-    let questionarios = await mongoose.connection.db.collection("Questionario")
-      .find({}, { 
-        // Projeção para retornar apenas campos essenciais
-        _id: 1,
-        codigo: 1,
-        nome: 1,
-        descricao: 1,
-        data: 1
-      })
-      .limit(100) // Limita a 100 questionários para evitar sobrecarga
-      .sort({ _id: -1 }) // Ordena pelos mais recentes
-      .toArray();
-    
-    console.log(`📊 ${questionarios.length} questionários encontrados`);
-    
-    // Retorna o resultado
-    response.status(200).json(questionarios);
-    
-  } catch (error) {
-    console.error('❌ Erro ao buscar questionários:', error);
-    response.status(500).json({ 
-      error: 'Erro interno do servidor ao buscar questionários',
-      message: error.message 
-    });
-  }
+    console.log('🔍 Iniciando busca de questionários por professor (via usuario)...');
 
-    
+    const { usuario } = req.query;
+
+    if (!usuario) {
+      return res.status(400).json({ error: 'usuario do professor é obrigatório' });
+    }
+
+    await connection();
+
+    // 🔎 Busca o professor pelo usuario (ignora maiúsculas/minúsculas/acentos via collation)
+    const professor = await mongoose.connection.db
+      .collection('Professor')
+      .findOne(
+        { Usuario: String(usuario).trim() },
+        {
+          projection: { Questionarios: 1 },
+          collation: { locale: 'pt', strength: 1 }, // strength:1 = case/acento insensitive
+        }
+      );
+
+    if (!professor) {
+      return res.status(404).json({ error: 'Professor não encontrado' });
+    }
+
+    const ids = Array.isArray(professor.Questionarios) ? professor.Questionarios : [];
+    if (!ids.length) {
+      return res.status(200).json([]); // professor sem questionários
+    }
+
+    // Garante ObjectId
+    const objIds = ids.map((id) =>
+      typeof id === 'string' ? new mongoose.Types.ObjectId(id) : id
+    );
+
+    // 📦 Busca os questionários relacionados
+    const questionarios = await mongoose.connection.db
+      .collection('Questionario')
+      .find(
+        { _id: { $in: objIds } },
+        { projection: { _id: 1, codigo: 1, nome: 1, descricao: 1, data: 1 } }
+      )
+      .sort({ _id: -1 })
+      .limit(100)
+      .toArray();
+
+    console.log(`📊 ${questionarios.length} questionários encontrados`);
+    return res.status(200).json(questionarios);
+  } catch (err) {
+    console.error('❌ Erro ao buscar questionários:', err);
+    return res.status(500).json({ error: 'Erro interno', message: err.message });
+  }
 }
 
 
