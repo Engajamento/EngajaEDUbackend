@@ -120,35 +120,79 @@ async function cadastraQuestionario(request, response) {
  * @param {Object} response - O objeto de resposta do Express.
  */
 async function deletarQuestionario(request, response) {
-    const { codigoQuestionario } = request.body; // Recebe o código do questionário no corpo da requisição
-    await connection(); 
-    const session = await mongoose.startSession();
-    
-    try {
-      session.startTransaction(); // Inicia a transação
-  
-      // 1. Deletar as questões associadas ao questionário
-      const questoesDeletadas = await QuestaoModel.deleteMany({ codigoQuestionario }, { session });
-      console.log(`${questoesDeletadas.deletedCount} questões deletadas.`);
-  
-      // 2. Deletar o questionário
-      const questionarioDeletado = await QuestionarioModel.deleteOne({ codigo: codigoQuestionario }, { session });
-      console.log(`Questionário deletado: ${questionarioDeletado.deletedCount}`);
-  
-      // Commit da transação
-      await session.commitTransaction();
-      
-      response.status(200).json({ success: true, message: "Questionário e questões deletados com sucesso." });
-  
-    } catch (error) {
-      await session.abortTransaction(); // Aborta a transação em caso de erro
-      console.error('Erro ao deletar questionário e questões:', error);
-      response.status(500).json({ success: false, message: 'Erro ao deletar questionário e questões.', error });
-    } finally {
-      session.endSession(); // Finaliza a sessão
-      console.log("Sessão finalizada.");
-    }
+  const { codigoQuestionario } = request.body;
+  const { usuario } = request.query;
+
+  console.log(usuario);
+
+  if (!usuario) {
+    return response.status(400).json({ success: false, message: 'usuario é obrigatório na query.' });
   }
+
+  await connection();
+
+  const session = await mongoose.startSession();
+  try {
+    session.startTransaction();
+
+    // 0) Localiza o questionário para obter o _id
+    const questionario = await mongoose.connection.db
+      .collection('Questionario')
+      .findOne({ codigo: codigoQuestionario }, { session });
+
+    if (!questionario) {
+      await session.abortTransaction();
+      return response.status(404).json({
+        success: false,
+        message: 'Questionário não encontrado pelo código informado.'
+      });
+    }
+
+    const questionarioId = questionario._id;
+
+    // 1) Remove a referência SOMENTE do professor informado (coleção "Professor", campo "Usuario")
+    // cobre ObjectId e string (caso o array misture tipos)
+    const inSet = [questionarioId, questionarioId.toString()];
+    await mongoose.connection.db
+      .collection('Professor')
+      .updateOne(
+        {
+          Usuario: String(usuario).trim(),
+          Questionarios: { $in: inSet }
+        },
+        {
+          $pull: { Questionarios: { $in: inSet } }
+        },
+        {
+          session,
+          collation: { locale: 'pt', strength: 1 } // case/acento insensitive
+        }
+      );
+
+    // 2) Deleta questões associadas a esse questionário
+    await QuestaoModel.deleteMany({ codigoQuestionario }, { session });
+
+    // 3) Deleta o próprio questionário
+    await QuestionarioModel.deleteOne({ _id: questionarioId }, { session });
+
+    await session.commitTransaction();
+
+    return response.status(200).json({
+      success: true,
+      message: 'Questionário removido com sucesso.'
+    });
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('Erro ao deletar questionário e vínculos:', error);
+    return response.status(500).json({
+      success: false,
+      message: 'Erro ao deletar questionário, questões ou referência no Professor.',
+      error: error?.message ?? String(error)
+    });
+  } finally {
+    session.endSession();
+  }
+}
   
 
 /**
