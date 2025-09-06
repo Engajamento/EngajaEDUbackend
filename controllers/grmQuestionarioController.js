@@ -28,44 +28,99 @@ const { response } = require('express');
  * @param {Object} response - O objeto de resposta do Express.
  */
 async function cadastraQuestionario(request, response) {
-    const { questionario } = request.body;
-    console.log();
-    await connection(); 
-    const session = await mongoose.startSession();
-    try {
-      //adiciona comentarios as questões
-     // var questionarioAux = await apiGptController.getChatGPTResponse(questionario);
-      session.startTransaction(); // Inicia a transação
-      // 1. Criar e salvar o questionário
-      const novoQuestionario = new QuestionarioModel({
-        nome: questionario.nome,
-        descricao: questionario.descricao,
-        codigo: questionario.codigo || (await gerarCodigoQuestionario()),
-        //explicacao : questionarioAux.explicacao
-      });
-      console.log(novoQuestionario);
-      // Salva o questionário no banco de dados
-      await novoQuestionario.save({ session });
-      // 2. Salvar as questões associadas ao questionário
-      const questoes = questionario.questoes.map(questaoData => ({
-        enunciado: questaoData.enunciado,
-        resposta: normalizaResposta(questaoData.resposta),
-        tema: questaoData.tema,
-        codigoQuestionario: novoQuestionario.codigo
-      }));
-      // Salva as questões em lote
-      await QuestaoModel.insertMany(questoes, { session });
-      // Commit da transação
-      await session.commitTransaction();
-      response.status(200).json({ success: true, message: "Questionário e questões cadastrados com sucesso!", questionario: novoQuestionario });
-    } catch (error) {
-      await session.abortTransaction(); // Aborta a transação em caso de erro
-      console.error('Erro ao cadastrar questionário e questões:', error);
-      response.status(500).json({ success: false, message: 'Erro ao cadastrar questionário e questões.', error });
-    } finally {
-      session.endSession(); // Finaliza a sessão
-      console.log("Sessão finalizada.");
+
+  console.log("rota chamada");
+  const { usuario } = request.query;
+  if (!usuario) {
+    return response.status(400).json({ success: false, message: 'usuario do professor é obrigatório' });
+  }
+
+  const { questionario } = request.body || {};
+  if (!questionario?.nome || !Array.isArray(questionario?.questoes) || questionario.questoes.length === 0) {
+    return response.status(400).json({ success: false, message: 'Payload inválido: informe nome e pelo menos uma questão' });
+  }
+
+  await connection();
+  const session = await mongoose.startSession();
+
+  let novoQuestionario = null;
+
+  try {
+    // Inicia transação para criar Questionário + Questões
+    session.startTransaction();
+
+    // 1) Criar e salvar o questionário
+    novoQuestionario = new QuestionarioModel({
+      nome: questionario.nome,
+      descricao: questionario.descricao,
+      codigo: questionario.codigo || (await gerarCodigoQuestionario()),
+      data: new Date()
+      // explicacao: questionarioAux?.explicacao
+    });
+
+    await novoQuestionario.save({ session });
+
+    // 2) Salvar as questões associadas ao questionário
+    const questoes = questionario.questoes.map((q) => ({
+      enunciado: q.enunciado,
+      resposta: normalizaResposta(q.resposta),
+      tema: q.tema,
+      codigoQuestionario: novoQuestionario.codigo
+    }));
+
+    await QuestaoModel.insertMany(questoes, { session });
+
+    // 3) Commit da transação de criação
+    await session.commitTransaction();
+    response.status(200).json({
+      success: true,
+      message: 'Questionário e questões cadastrados com sucesso!',
+      questionario: novoQuestionario
+    });
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('Erro ao cadastrar questionário e questões:', error);
+    return response.status(500).json({
+      success: false,
+      message: 'Erro ao cadastrar questionário e questões.',
+      error: error?.message || error
+    });
+  } finally {
+    await session.endSession();
+    console.log('Sessão finalizada.');
+  }
+
+  
+  // ---- PASSO 2: (re)abrir conexão e vincular ao Professor por usuario ----
+  try {
+    await connection(); // conforme solicitado, abre novamente
+    const profUpdate = await mongoose.connection.db
+      .collection('Professor')
+      .updateOne(
+        { Usuario: String(usuario).trim() },                // campo "Usuario" na coleção
+        { $addToSet: { Questionarios: novoQuestionario._id } },
+        { collation: { locale: 'pt', strength: 1 } }        // case/acento insensitive
+      );
+      
+    if (profUpdate.matchedCount === 0) {
+      // professor não encontrado -> limpa o que foi criado para não ficar órfão
+      await Promise.all([
+        QuestaoModel.deleteMany({ codigoQuestionario: novoQuestionario.codigo }),
+        QuestionarioModel.deleteOne({ _id: novoQuestionario._id })
+      ]);
+
+      // Opcional: alterar a resposta já enviada não é possível; loga o problema
+      console.warn(
+        'Professor não encontrado para vincular questionário. Questionário e questões removidos.',
+        { usuario }
+      );
+    } else {
+      console.log('Questionário vinculado ao professor com sucesso.');
     }
+  } catch (linkError) {
+    console.error('Erro ao vincular questionário ao professor:', linkError);
+    // aqui não retornamos outra resposta (já respondemos sucesso acima); apenas log
+  }
   }
   
   /**
